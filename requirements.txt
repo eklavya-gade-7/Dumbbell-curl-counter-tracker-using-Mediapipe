@@ -1,0 +1,32 @@
+# ---------------------------------------------------------------------------
+# Curl Counter — Python dependencies
+#
+# IMPORTANT: install in the order described in the README. Ultralytics must be
+# installed with `--no-deps` (after this file) so it does NOT pull in
+# `opencv-python`, which would clash with the `opencv-contrib-python` that
+# MediaPipe needs. See the "Installation" section of README.md.
+# ---------------------------------------------------------------------------
+
+# CPU-only PyTorch wheels (no NVIDIA/CUDA required for this project).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.12.0+cpu
+torchvision==0.27.0+cpu
+
+# Pose estimation + computer vision.
+mediapipe==0.10.33
+opencv-contrib-python==4.13.0.92
+numpy==2.4.4
+
+# Ultralytics YOLO runtime dependencies (ultralytics itself is installed
+# separately with --no-deps — see README). These are everything ultralytics
+# needs EXCEPT opencv-python (deliberately omitted) and torch/torchvision
+# (installed above as CPU builds).
+matplotlib==3.10.8
+pillow==12.2.0
+PyYAML==6.0.3
+requests==2.33.1
+scipy==1.17.1
+polars==1.41.2
+psutil==7.2.2
+nvidia-ml-py==13.610.43
+ultralytics-thop==2.0.20

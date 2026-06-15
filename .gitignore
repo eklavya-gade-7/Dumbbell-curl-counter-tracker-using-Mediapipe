@@ -1,0 +1,31 @@
+# ---- Virtual environments ----
+venv/
+.venv/
+env/
+ENV/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- Models ----
+# The MediaPipe pose model is downloaded separately (see README), not committed.
+models/pose_landmarker_heavy.task
+# Keep the custom YOLO dumbbell model (models/best_dumb_bell.pt) tracked — it is
+# the centerpiece of the project. If it pushes you over GitHub's size limits,
+# move it to Git LFS (see README) and add it here instead.
+
+# ---- OS / editors / tooling ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/
+
+# ---- Runtime artifacts ----
+runs/
+*.log
