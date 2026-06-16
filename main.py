@@ -26,6 +26,26 @@ latest_result = None
 curl_threshold = False
 curl_counter = 0
 
+# --- YOLO throttling -------------------------------------------------------
+# The dumbbell model is heavy and we're on CPU, so running it every frame is
+# laggy. Run it only once every N frames and re-use (cache) the last result on
+# the in-between frames so the box stays drawn instead of flickering.
+YOLO_EVERY_N = 20
+frame_count = 0
+detections = []          # cached list of (x1, y1, x2, y2) from the last YOLO run
+dumbbell_present = False  # stays True between YOLO runs; only cleared when a
+                          # YOLO frame comes back with no dumbbell.
+
+# A dumbbell, even held close to the camera, only occupies a modest slice of
+# the frame. Boxes bigger than this fraction of the frame area are almost
+# certainly false positives (background / the "other" class spanning the view),
+# so we drop them. 0.20 == 20% of the frame; for a 640x480 feed that's
+# ~61,000 px (roughly a 248x248 region) — generous for a real dumbbell.
+MAX_BOX_AREA_RATIO = 0.20
+
+# Minimum YOLO confidence to trust a detection.
+MIN_CONF = 0.85
+
 
 def draw_landmarks_on_image(image, detection_result):
   pose_landmarks_list = detection_result.pose_landmarks
@@ -83,14 +103,31 @@ with PoseLandmarker.create_from_options(options) as detector:
       print("Failed to read frame")
       break
     h, w = frame.shape[:2]
+    max_box_area = MAX_BOX_AREA_RATIO * (w * h)
 
-    # Detect dumbbells. In detection mode results[0].boxes is ALWAYS a Boxes
-    # object (never None), so test how many boxes were found, not None-ness.
-    yolo_results = YOLO_model(frame, verbose=False)[0]
-
-    if len(yolo_results.boxes) > 0:
+    # Detect dumbbells only every YOLO_EVERY_N frames (the model is heavy on
+    # CPU). On the in-between frames we redraw the cached boxes so nothing
+    # flickers. In detection mode results[0].boxes is ALWAYS a Boxes object
+    # (never None), so we iterate and filter rather than testing None-ness.
+    if frame_count % YOLO_EVERY_N == 0:
+      yolo_results = YOLO_model(frame, verbose=False)[0]
+      detections = []
       for box in yolo_results.boxes:
+        if float(box.conf[0]) <= MIN_CONF:
+          continue
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+        # Skip boxes that are too large to plausibly be a dumbbell.
+        if (x2 - x1) * (y2 - y1) >= max_box_area:
+          continue
+        detections.append((x1, y1, x2, y2))
+      # Update the "is a dumbbell present" flag only on YOLO frames. It then
+      # holds for the next YOLO_EVERY_N frames, so we keep counting reps until
+      # a YOLO frame actually fails to find the dumbbell.
+      dumbbell_present = len(detections) > 0
+    frame_count += 1
+
+    if detections:
+      for (x1, y1, x2, y2) in detections:
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
         # Label sits just above the top edge of the box (kept on-screen).
         label_y = y1 - 10 if y1 - 10 > 20 else y1 + 25
@@ -130,7 +167,9 @@ with PoseLandmarker.create_from_options(options) as detector:
 
       if required_angle > 160:
         curl_threshold = False
-      if required_angle < 30 and not curl_threshold:
+      # Only count a rep while a dumbbell is present (the flag persists across
+      # frames until a YOLO frame finds none).
+      if required_angle < 30 and not curl_threshold and dumbbell_present:
         curl_threshold = True
         curl_counter += 1
 
