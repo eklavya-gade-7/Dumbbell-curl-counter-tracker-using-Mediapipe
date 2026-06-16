@@ -32,8 +32,11 @@
 
 - 🤸 **Live pose tracking** — MediaPipe **Pose Landmarker (Heavy)** running in `LIVE_STREAM` mode for smooth, low-latency skeleton overlays.
 - 📐 **On-frame angle readout** — the elbow angle is computed every frame and drawn right next to the joint being measured.
-- 🔢 **Automatic rep counting** — a simple, robust state machine counts a rep only on a full extend → curl cycle (no double counting).
-- 🏋️ **Custom dumbbell detection** — a YOLO26-L model (classes: `dumbbell`, `other`) draws a bounding box and a *"Dumbell Detected"* label above the weight.
+- 🔢 **Automatic rep counting** — a simple, robust state machine counts a rep only on a full extend → curl cycle (no double counting), and **only while a dumbbell is held**.
+- 🏋️ **Custom dumbbell detection** — a YOLO26-L model (classes: `dumbbell`, `other`) draws a bounding box and a *"Dumbell Detected"* label above the weight. The `other` class is ignored entirely.
+- 🎯 **Wrist-anchored validation** — a dumbbell only counts when it overlaps a circular **region of interest around your right wrist**, so weights lying in the background never trigger a rep.
+- ⚡ **CPU-friendly throttling** — the heavy detector runs only once every *N* frames and its boxes are cached in between, keeping the live feed responsive without a GPU.
+- 🧹 **False-positive filtering** — detections are screened by confidence and by box size (boxes too large to be a real dumbbell are discarded).
 - 🖥️ **Clean HUD** — rep count, current stage (`up`/`down`), live angle, and detection status, all rendered with OpenCV.
 - 💻 **CPU-friendly** — ships with CPU-only PyTorch wheels; no GPU required.
 
@@ -55,10 +58,11 @@
 
 1. **Pose estimation** — each frame is sent to MediaPipe's Pose Landmarker. The result arrives asynchronously via a callback and is cached for the main loop.
 2. **Elbow angle** — using the right-arm landmarks **shoulder (12) → elbow (14) → wrist (16)**, two vectors are built *from the elbow* and the angle between them is computed via the dot product (`arccos`, converted to degrees).
-3. **Rep state machine**
+3. **Dumbbell detection (throttled)** — to stay responsive on a CPU, the YOLO model runs only **once every `YOLO_EVERY_N` frames**; its boxes are cached and re-drawn on the in-between frames. Each detection is filtered by **class** (only `dumbbell`, never `other`), **confidence** (`> MIN_CONF`) and **box area** (boxes larger than `MAX_BOX_AREA_RATIO` of the frame are discarded as false positives).
+4. **Wrist region of interest** — a circle is centred on the **right wrist** (radius = `ROI_RADIUS_RATIO` of the frame width). A detected dumbbell is only accepted if at least `ROI_MIN_OVERLAP` of its box area falls inside that circle — i.e. the weight is actually in your hand. Accepted boxes are outlined and labelled *"Dumbell Detected"*; otherwise *"No Dumbell Detected"* is shown in the corner.
+5. **Rep state machine** (only advances while a dumbbell is accepted in the wrist ROI):
    - Angle **> 160°** → arm extended → stage = `down` (re-arms the counter).
    - Angle **< 30°** while previously `down` → arm fully curled → stage = `up` → **+1 rep**.
-4. **Dumbbell detection** — the same frame is passed to the YOLO model; every detected box is outlined and labelled. If nothing is found, *"No Dumbell Detected"* is shown in the corner.
 
 ---
 
@@ -69,8 +73,9 @@
 | 🟧 **CURLS** banner | Top-left | Total reps counted + current `stage` (`up` / `down`) |
 | 🟡 **`NN deg`** | Next to right elbow | Live elbow angle in degrees |
 | 🟩 **Skeleton** | Over your body | MediaPipe pose landmarks & connections |
-| 🟥 **Box + "Dumbell Detected"** | Above the dumbbell | YOLO detection (drawn per detected object) |
-| 🟥 **"No Dumbell Detected"** | Bottom-left | Shown when no dumbbell is in frame |
+| 🟦 **ROI circle** | Around right wrist | The region a dumbbell must overlap to count |
+| 🟥 **Box + "Dumbell Detected"** | Above the dumbbell | Accepted YOLO detection inside the wrist ROI |
+| 🟥 **"No Dumbell Detected"** | Bottom-left | Shown when no dumbbell is accepted near the wrist |
 
 Press **`q`** at any time to quit.
 
@@ -219,23 +224,22 @@ The counter increments at the top of each rep. Press **`q`** to quit.
 
 All tunables live near the top of / inside the main loop in **`main.py`**:
 
-| What | Where | Default | Notes |
+| What | Constant / location | Default | Notes |
 | --- | --- | --- | --- |
 | **Camera index** | `cv2.VideoCapture(0)` | `0` | Try `1`, `2`… for external webcams. |
 | **"Down" threshold** | `if required_angle > 160:` | `160°` | Angle above which the arm counts as extended. |
 | **"Up" threshold** | `if required_angle < 30 ...` | `30°` | A full curl is often only ~40–50°; raise to `~40` if reps don't register. |
-| **Tracked arm** | landmark indices `12, 14, 16` | right arm | Use `11, 13, 15` for the left arm. |
-| **Detection confidence** | `YOLO_model(frame, ...)` | `0.25` | Add `conf=0.5` to reduce false positives. |
+| **Tracked arm** | landmark indices `12, 14, 16` | right arm | Use `11, 13, 15` for the left arm (and update the wrist ROI landmark to `15`). |
+| **YOLO run interval** | `YOLO_EVERY_N` | `20` | Run detection every Nth frame. Lower = fresher boxes (less lag tolerance), higher = smoother feed. |
+| **Min confidence** | `MIN_CONF` | `0.85` | Drop detections below this confidence. |
+| **Max box area** | `MAX_BOX_AREA_RATIO` | `0.20` | Boxes larger than this fraction of the frame are treated as false positives. |
+| **Wrist ROI radius** | `ROI_RADIUS_RATIO` | `0.13` | Circle radius as a fraction of frame width. Bigger = more forgiving placement. |
+| **ROI overlap** | `ROI_MIN_OVERLAP` | `0.30` | Min fraction of a box's area that must sit inside the wrist circle to count. |
 
-> 💡 **Tip — the `other` class:** the model has two classes (`dumbbell`, `other`).
-> The overlay currently labels *every* detection as a dumbbell. To only react to
-> actual dumbbells, filter on the class id inside the detection loop:
-> ```python
-> for box in yolo_results.boxes:
->     if int(box.cls[0]) != 0:   # 0 == "dumbbell"
->         continue
->     ...
-> ```
+> 💡 **Note — the `other` class:** the model has two classes (`0 = dumbbell`,
+> `1 = other`). The detection loop already filters to class `0`, so the `other`
+> class is never drawn or counted. If your model's class ids differ, print
+> `YOLO_model.names` and update the `int(box.cls[0]) != 0` check accordingly.
 
 ---
 
@@ -279,10 +283,10 @@ so you can run the app from any directory.
 
 ## 🗺️ Roadmap
 
+- [x] Only count reps while a dumbbell is actually detected near the wrist
 - [ ] Count both arms simultaneously
 - [ ] Per-set / per-session rep history and stats
 - [ ] Rep tempo & form feedback (e.g. partial-rep detection)
-- [ ] Only count reps while a dumbbell is actually detected
 - [ ] On-screen FPS and a record-to-video option
 
 ---

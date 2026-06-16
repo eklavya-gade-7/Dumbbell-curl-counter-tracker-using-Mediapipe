@@ -46,6 +46,14 @@ MAX_BOX_AREA_RATIO = 0.20
 # Minimum YOLO confidence to trust a detection.
 MIN_CONF = 0.85
 
+# --- Wrist region of interest (ROI) ----------------------------------------
+# A detected dumbbell only "counts" if it sits near the RIGHT wrist: we build a
+# circle centred on the wrist and require a decent fraction of the dumbbell's
+# box to fall inside it. Radius is a fraction of the frame width so it scales
+# with resolution; ROI_MIN_OVERLAP is the minimum box-area fraction inside.
+ROI_RADIUS_RATIO = 0.13
+ROI_MIN_OVERLAP = 0.30
+
 
 def draw_landmarks_on_image(image, detection_result):
   pose_landmarks_list = detection_result.pose_landmarks
@@ -77,6 +85,24 @@ def compute_angle(vector1, vector2):
   cos_angle = np.clip(dot_product / (mag_vec_1 * mag_vec_2), -1.0, 1.0)
   angle = np.degrees(np.arccos(cos_angle))
   return angle
+
+
+def fraction_in_circle(box, center, radius, grid=8):
+  """Approximate the fraction of a bounding box's area that falls inside a
+  circle, by sampling a grid x grid set of points across the box."""
+  x1, y1, x2, y2 = box
+  if x2 <= x1 or y2 <= y1:
+    return 0.0
+  cx, cy = center
+  r2 = radius * radius
+  inside = 0
+  for i in range(grid):
+    px = x1 + (x2 - x1) * (i + 0.5) / grid
+    for j in range(grid):
+      py = y1 + (y2 - y1) * (j + 0.5) / grid
+      if (px - cx) ** 2 + (py - cy) ** 2 <= r2:
+        inside += 1
+  return inside / (grid * grid)
 
 
 def result_callback(result, output_image: mp.Image, timestamp_ms: int):
@@ -113,6 +139,10 @@ with PoseLandmarker.create_from_options(options) as detector:
       yolo_results = YOLO_model(frame, verbose=False)[0]
       detections = []
       for box in yolo_results.boxes:
+        # The model has two classes: 0 == dumbbell, 1 == other. Only keep
+        # actual dumbbells; ignore the "other" class entirely (no box, no text).
+        if int(box.cls[0]) != 0:
+          continue
         if float(box.conf[0]) <= MIN_CONF:
           continue
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
@@ -120,29 +150,45 @@ with PoseLandmarker.create_from_options(options) as detector:
         if (x2 - x1) * (y2 - y1) >= max_box_area:
           continue
         detections.append((x1, y1, x2, y2))
-      # Update the "is a dumbbell present" flag only on YOLO frames. It then
-      # holds for the next YOLO_EVERY_N frames, so we keep counting reps until
-      # a YOLO frame actually fails to find the dumbbell.
-      dumbbell_present = len(detections) > 0
     frame_count += 1
 
-    if detections:
-      for (x1, y1, x2, y2) in detections:
+    # Build a circular ROI around the RIGHT wrist (landmark 16) from the most
+    # recent pose result, and keep only the cached dumbbell boxes that overlap
+    # it enough. A dumbbell that isn't near the wrist doesn't count.
+    result = latest_result
+
+    wrist_px = None
+    roi_radius = int(ROI_RADIUS_RATIO * w)
+    if result is not None and result.pose_landmarks:
+      rw = result.pose_landmarks[0][16]
+      wrist_px = (int(rw.x * w), int(rw.y * h))
+      cv2.circle(frame, wrist_px, roi_radius, (255, 255, 0), 1, cv2.LINE_AA)
+
+    valid_dumbbells = []
+    if wrist_px is not None:
+      for box in detections:
+        if fraction_in_circle(box, wrist_px, roi_radius) >= ROI_MIN_OVERLAP:
+          valid_dumbbells.append(box)
+
+    # The flag the rep counter relies on: a dumbbell is "present" only if one
+    # overlaps the wrist ROI.
+    dumbbell_present = len(valid_dumbbells) > 0
+
+    if valid_dumbbells:
+      for (x1, y1, x2, y2) in valid_dumbbells:
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
         # Label sits just above the top edge of the box (kept on-screen).
         label_y = y1 - 10 if y1 - 10 > 20 else y1 + 25
         cv2.putText(frame, "Dumbell Detected", (x1, label_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
     else:
-      # No dumbbell -> message in the bottom-left corner of the frame.
+      # No dumbbell near the wrist -> message in the bottom-left corner.
       cv2.putText(frame, "No Dumbell Detected", (15, h - 20),
                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_frame = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
     detector.detect_async(mp_frame, int(time.time() * 1000))
-
-    result = latest_result
 
     if result is not None and result.pose_landmarks and result.pose_world_landmarks:
       frame = draw_landmarks_on_image(frame, result)
